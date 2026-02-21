@@ -29,6 +29,7 @@ The result is higher-quality code reviews that catch real issues while filtering
   ├── Filters out auto-generated files from diff
   ├── Sends filtered diff to George and Oscar in parallel
   ├── 15-min timeout per reviewer, 1 retry on failure
+  ├── Cleans CLI noise from output (keeps raw in log)
   ├── Numbers all suggestions sequentially
   └── Returns assembled review package
         |
@@ -131,9 +132,12 @@ escape for JS string contexts.
 ## Review Logging
 
 Every run saves a full log to `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md` containing:
-- Review scope, files, focus notes
-- Raw vs. filtered diff size
-- Complete unedited output from both George and Oscar
+- Review scope, file count with additions/deletions, focus notes
+- Raw vs. filtered diff size with excluded file count
+- Three sections per reviewer:
+  - **Cleaned Review Output** — just the findings, CLI noise stripped
+  - **Raw Output (stdout)** — complete unedited output for troubleshooting
+  - **Diagnostic Output (stderr)** — errors, warnings, and stack traces captured separately
 - Exit codes and retry status
 
 ## Key Design Decisions
@@ -144,6 +148,9 @@ Every run saves a full log to `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md` con
 - **Anti-hallucination prompt** — George's prompt explicitly instructs: only flag issues in authored code, not reference docs or generated files
 - **True parallel execution** — Both reviewers launched in a single Bash call so they run concurrently
 - **Single retry** — Non-timeout failures get one retry before marking reviewer as unavailable
+- **Stderr separation** — Reviewer diagnostic output (errors, stack traces, deprecation warnings) captured to separate files, keeping review findings clean
+- **Output cleaning** — CLI noise (Codex thinking/exec markers, Gemini startup messages, session headers, duplicate findings) stripped before analysis. Raw output preserved in the log for troubleshooting
+- **Unconstrained reviewers** — Both George and Oscar are free to explore the repository using their own techniques. Their independent exploration often surfaces bugs that a narrowly scoped diff review would miss
 - **Neutral detailed findings** — Detailed section presents reviewer feedback without judgement; triage lives only in the executive summary
 - **Separation of concerns** — The skill handles analysis/triage, the subagent handles collection. Swap the subagent for an MCP server later without changing the skill
 

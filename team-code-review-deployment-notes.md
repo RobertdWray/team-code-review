@@ -116,6 +116,24 @@ The log records raw vs. filtered diff size for transparency.
 - Reads `GEMINI.md` for project-specific review context automatically
 - Prompt includes explicit instruction: **only flag issues in authored code, not in reference docs, auto-generated files, or boilerplate** — prevents hallucinations from context bleed
 
+#### Reviewer Exploration Behavior
+
+Both reviewers are free to explore the repository using their own techniques. Oscar may run git commands and inspect files beyond the piped diff; George may use its large context window to analyze related code. This is expected and encouraged — each tool's exploration techniques can surface bugs that a narrowly scoped diff review would miss. The output cleaning step (Step 3b) separates their findings from their exploration noise.
+
+#### Output Noise Patterns
+
+Both tools emit significant CLI noise alongside their review findings. The review-collector separates stderr from stdout and cleans stdout before packaging findings.
+
+**George (Gemini CLI) noise:**
+- *stderr:* Node.js deprecation warnings (`(node:...) [DEP...]`), GaxiosError stack traces on rate limits (429s are retried internally but the full error + HTTP config/response objects are logged), auth library traces
+- *stdout:* Startup messages (`Loaded cached credentials.`, `Loading extension: conductor`, `Server '...' supports tool updates`, `Hook registry initialized with N hook entries`)
+
+**Oscar (Codex CLI) noise:**
+- *stderr:* Rust-level ERROR logs (`ERROR codex_core::...`, `ERROR rmcp::transport::...`), MCP server startup failures
+- *stdout:* Session header (version, model, provider, sandbox mode, session ID, `--------` separators), `thinking`/`exec`/`codex` phase markers with full command output between them, bold thinking summaries (`**Planning...`, `**Reviewing...`), prompt echo (Codex repeats the entire prompt it received), `tokens used` summary, and sometimes duplicate findings (numbered list appears once in a `codex` block then repeats as final output)
+
+In the first live run, George's actual findings were ~30 lines buried in ~120 lines of noise. Oscar's findings were ~50 lines buried in ~1000 lines of exploration output and phase markers.
+
 #### Execution and Reliability
 
 - **True parallel execution:** Both reviewers launched in a single Bash tool call with `&` + `wait` so they run concurrently (separate Bash calls would be sequential)
@@ -129,8 +147,12 @@ The log records raw vs. filtered diff size for transparency.
 Every review run saves a full log to `~/Downloads/` for troubleshooting:
 
 - **File:** `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md`
-- **Contains:** Date, review scope, files reviewed, focus notes, diff size (raw → filtered), exit codes, retry status, and the **complete raw output** from both George and Oscar before any re-numbering or formatting
-- Lets you inspect each reviewer's full thought process for a deeper dive
+- **Contains:** Date, review scope, files reviewed (file count + additions/deletions), focus notes, diff size (raw → filtered with excluded file count), exit codes, retry status
+- **Three sections per reviewer:**
+  1. **Cleaned Review Output** — just the findings, with CLI noise stripped (what gets sent for analysis)
+  2. **Raw Output (stdout)** — complete unedited stdout showing the reviewer's full exploration and thought process
+  3. **Diagnostic Output (stderr)** — errors, warnings, and stack traces captured separately
+- Lets you inspect each reviewer's full process for a deeper dive while keeping the findings scannable
 - Persists after the review — not cleaned up automatically
 
 ### Technical Considerations
@@ -139,8 +161,8 @@ Every review run saves a full log to `~/Downloads/` for troubleshooting:
 - Codex `exec` is branch-agnostic — used for PR/branch reviews with diff piped via stdin
 - Gemini has 1M token context (can review entire medium codebases); Codex context varies by model
 - User focus notes (e.g., "focus on auth changes") are passed through to both reviewers
-- Temp working files cleaned up after log is saved
-- Error output captured alongside stdout for debugging
+- Temp working files cleaned up after log is saved (includes stderr files)
+- Error output (stderr) captured to separate files from review output (stdout) — prevents rate limit stack traces, deprecation warnings, and MCP errors from burying review findings
 
 ---
 

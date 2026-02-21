@@ -96,12 +96,18 @@ awk '
 ' /tmp/review-raw-diff.txt > /tmp/review-filtered-diff.txt
 ```
 
-After filtering, log how much was removed:
+After filtering, log what was removed and what remains:
 
 ```bash
 RAW_SIZE=$(wc -c < /tmp/review-raw-diff.txt)
 FILTERED_SIZE=$(wc -c < /tmp/review-filtered-diff.txt)
-echo "Diff filtered: ${RAW_SIZE} bytes → ${FILTERED_SIZE} bytes"
+RAW_FILES=$(grep -c '^diff --git' /tmp/review-raw-diff.txt || echo 0)
+FILTERED_FILES=$(grep -c '^diff --git' /tmp/review-filtered-diff.txt || echo 0)
+EXCLUDED_FILES=$(( RAW_FILES - FILTERED_FILES ))
+ADDITIONS=$(grep -c '^+[^+]' /tmp/review-filtered-diff.txt || echo 0)
+DELETIONS=$(grep -c '^-[^-]' /tmp/review-filtered-diff.txt || echo 0)
+echo "Diff: ${FILTERED_FILES} files (+${ADDITIONS}/-${DELETIONS}), ${EXCLUDED_FILES} auto-generated files excluded"
+echo "Size: ${RAW_SIZE} bytes raw → ${FILTERED_SIZE} bytes filtered"
 ```
 
 If the filtered diff is empty, warn the caller that all changes were auto-generated and there's nothing to review.
@@ -118,7 +124,7 @@ If the filtered diff is empty, warn the caller that all changes were auto-genera
 FOCUS_NOTES="[user's focus notes or empty]"
 
 # Launch BOTH reviewers simultaneously
-cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following diff. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following diff. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
 CODEX_PID=$!
 
 cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
@@ -131,7 +137,7 @@ IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 
 If you are unsure whether a file is authored code or generated/reference material, err on the side of skipping it.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
+${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -149,7 +155,7 @@ echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 FOCUS_NOTES="[user's focus notes or empty]"
 
 # Launch BOTH reviewers simultaneously
-timeout 900 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+timeout 900 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
 CODEX_PID=$!
 
 cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
@@ -162,7 +168,7 @@ IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 
 If you are unsure whether a file is authored code or generated/reference material, err on the side of skipping it.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
+${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -180,14 +186,14 @@ echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 FOCUS_NOTES="[user's focus notes or empty]"
 
 # Launch BOTH reviewers simultaneously
-cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following files. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following files. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
 CODEX_PID=$!
 
 timeout 900 gemini -p "@src/auth.ts @src/middleware.ts Review these files. Provide a numbered list of specific, actionable findings. For each finding include: severity, file and line(s), what the issue is, and how to fix it.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in auto-generated code, reference documentation, or boilerplate configuration.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
+${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -200,6 +206,40 @@ echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 ```
 
 **Why one Bash call matters:** If you use two separate Bash tool calls, Claude Code runs them sequentially — the second waits for the first to finish. By putting both `&` commands and the `wait` in a single script, they launch at the same time and run concurrently.
+
+### Step 3b: Clean Reviewer Output
+
+Both tools emit significant CLI noise alongside their actual review findings. Before numbering suggestions (Step 5), read each reviewer's stdout file and extract just the review findings. The raw output is preserved in the log file (Step 4) for troubleshooting — this cleaning step only affects what gets returned to the main conversation for analysis.
+
+**Both reviewers are free to explore the repository using their own techniques** — Oscar may run git commands to understand the codebase, George may use its context window to analyze related files. This is expected and often surfaces bugs that a narrowly scoped review would miss. The cleaning step below simply separates their findings from their process noise.
+
+#### Oscar (Codex CLI) cleaning rules
+
+Oscar's stdout typically contains session headers, thinking/planning markers, shell commands with full output, and sometimes duplicate findings. Strip:
+
+- **Session header lines:** Lines matching `OpenAI Codex v...`, `workdir:`, `model:`, `provider:`, `approval:`, `sandbox:`, `reasoning effort:`, `reasoning summaries:`, `session id:`, and `--------` separator lines
+- **MCP startup lines:** Any line starting with `mcp:`
+- **Phase markers:** Lines that are exactly `thinking`, `exec`, or `codex` (Codex's internal phase markers)
+- **Bold thinking summaries:** Lines starting with `**` followed by a gerund (e.g., `**Planning...`, `**Reviewing...`, `**Starting...`, `**Analyzing...`, `**Checking...`, `**Inspecting...`, `**Gathering...`, `**Identifying...`, `**Summarizing...`)
+- **Exec block content:** Lines showing shell commands (starting with `/bin/` or containing `succeeded in` followed by `ms:`) and all subsequent output until the next phase marker
+- **Prompt echo:** The `user` marker line and the block of text that echoes the prompt back (Codex repeats the full prompt it received)
+- **Token summary:** Lines matching `tokens used` and any following number
+- **Duplicate findings:** If the numbered findings list appears twice (Oscar sometimes emits findings in a `codex` output block, then repeats them as final output), keep only the **last** occurrence. Detection: if the last numbered finding (e.g., `6.`) appears twice, the list is duplicated — strip everything before the second occurrence.
+
+After cleaning, Oscar's output should contain only the numbered findings list with severity, file paths, and explanations.
+
+#### George (Gemini CLI) cleaning rules
+
+George's stdout is generally cleaner, but may contain startup messages. Strip:
+
+- **Startup messages:** `Loaded cached credentials.`, lines starting with `Loading extension:`, lines starting with `Server '` and containing `supports tool updates`, lines starting with `Hook registry initialized`
+- **Node.js warnings:** Lines matching `(node:` followed by `[DEP`, and the follow-up line `(Use \`node --trace-deprecation`
+
+After cleaning, George's output should contain only the numbered findings list.
+
+#### How to clean
+
+Read each `/tmp/*-review.txt` file. Apply the rules above to identify and remove noise lines. The cleaned output is what you use in Steps 5 and 6 for numbering and packaging. The original files remain on disk for the log in Step 4.
 
 ### Step 4: Retry on Failure, Collect, and Log
 
@@ -214,7 +254,7 @@ If a reviewer failed (non-zero exit) but did NOT timeout (exit code 124), retry 
 if [ $CODEX_EXIT -ne 0 ] && [ $CODEX_EXIT -ne 124 ]; then
     echo "Oscar failed (exit $CODEX_EXIT), retrying once..."
     # Re-run the same command
-    cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "..." > /tmp/oscar-review.txt 2>&1
+    cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "..." > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt
     CODEX_EXIT=$?
     CODEX_RETRIED=true
 fi
@@ -222,7 +262,7 @@ fi
 # Retry George if failed (not timeout)
 if [ $GEMINI_EXIT -ne 0 ] && [ $GEMINI_EXIT -ne 124 ]; then
     echo "George failed (exit $GEMINI_EXIT), retrying once..."
-    cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "..." --output-format text > /tmp/george-review.txt 2>&1
+    cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "..." --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt
     GEMINI_EXIT=$?
     GEMINI_RETRIED=true
 fi
@@ -240,36 +280,50 @@ Write a markdown log file to `~/Downloads/` for troubleshooting. Use this naming
 ~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md
 ```
 
-The log file should contain:
+The log file should contain three sections per reviewer: cleaned findings, raw stdout, and stderr. This separates the signal (what the reviewer found) from the noise (CLI startup messages, shell command output, phase markers) and diagnostic info (errors, warnings, stack traces).
 
 ```markdown
 # Team Code Review Log
 **Date:** YYYY-MM-DD HH:MM:SS
 **Review scope:** [PR #42 / files / staged / uncommitted / branch]
-**Files reviewed:** [list of files or "diff against main"]
+**Files reviewed:** [N] files (+[additions]/-[deletions]) — diff against main
 **Focus notes:** [user's focus notes, or "none"]
-**Diff size:** [raw bytes] → [filtered bytes] ([N] auto-generated file patterns removed)
+**Diff filtered:** [raw bytes] → [filtered bytes] ([N] auto-generated files excluded)
 
 ---
 
-## George (Gemini CLI) — Raw Output
+## George (Gemini CLI)
 **Exit code:** [0/124/other]
 **Status:** [success / timed out / error]
 **Retried:** [yes — first attempt failed with exit N / no]
 
+### Cleaned Review Output
+[paste the cleaned output from Step 3b — just the review findings]
+
+### Raw Output (stdout)
 [paste the complete raw contents of /tmp/george-review.txt here]
 
+### Diagnostic Output (stderr)
+[paste the contents of /tmp/george-stderr.txt, or "none" if empty]
+
 ---
 
-## Oscar (Codex CLI) — Raw Output
+## Oscar (Codex CLI)
 **Exit code:** [0/124/other]
 **Status:** [success / timed out / error]
 **Retried:** [yes — first attempt failed with exit N / no]
 
+### Cleaned Review Output
+[paste the cleaned output from Step 3b — just the review findings]
+
+### Raw Output (stdout)
 [paste the complete raw contents of /tmp/oscar-review.txt here]
+
+### Diagnostic Output (stderr)
+[paste the contents of /tmp/oscar-stderr.txt, or "none" if empty]
 ```
 
-This log preserves the **full unedited output** from both tools — before any re-numbering or formatting — so the user can inspect each reviewer's raw thought process.
+This log preserves **everything** for troubleshooting — the full raw stdout shows each reviewer's exploration process, and the stderr captures errors and warnings separately — while the cleaned section gives a quick view of just the findings.
 
 ### Step 5: Number All Suggestions
 
@@ -322,5 +376,5 @@ If a reviewer failed (even after retry):
 - DO pass the user's focus notes to both reviewers
 - DO retry once on non-timeout failures before giving up
 - Always save the review log to `~/Downloads/` BEFORE cleaning up temp files
-- Clean up temp files (`/tmp/review-raw-diff.txt`, `/tmp/review-filtered-diff.txt`, `/tmp/george-review.txt`, `/tmp/oscar-review.txt`) after the log is written
+- Clean up temp files (`/tmp/review-raw-diff.txt`, `/tmp/review-filtered-diff.txt`, `/tmp/george-review.txt`, `/tmp/oscar-review.txt`, `/tmp/george-stderr.txt`, `/tmp/oscar-stderr.txt`) after the log is written
 - Tell the user the log file path so they can find it later
