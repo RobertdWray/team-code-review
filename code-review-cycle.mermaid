@@ -1,0 +1,120 @@
+flowchart TD
+    %% Styling
+    classDef claudeStyle fill:#6B46C1,stroke:#553C9A,color:#FFFFFF,stroke-width:2px
+    classDef userStyle fill:#2D3748,stroke:#1A202C,color:#FFFFFF,stroke-width:2px
+    classDef geminiStyle fill:#1A73E8,stroke:#1557B0,color:#FFFFFF,stroke-width:2px
+    classDef codexStyle fill:#10A37F,stroke:#0D8A6A,color:#FFFFFF,stroke-width:2px
+    classDef bucketGood fill:#38A169,stroke:#2F855A,color:#FFFFFF,stroke-width:2px
+    classDef bucketTalk fill:#D69E2E,stroke:#B7791F,color:#FFFFFF,stroke-width:2px
+    classDef bucketBad fill:#E53E3E,stroke:#C53030,color:#FFFFFF,stroke-width:2px
+    classDef promptStyle fill:#4A5568,stroke:#2D3748,color:#FFFFFF,stroke-width:1px
+    classDef subagentStyle fill:#9F7AEA,stroke:#805AD5,color:#FFFFFF,stroke-width:2px
+
+    %% Phase 1: Code Writing
+    subgraph P1["🔨 PHASE 1: Code Writing"]
+        CC1["""🟣 Claude Code
+        Writes Code"""]:::claudeStyle
+        CC1 --> U1["""👤 User Reviews
+        'Code is ready for review'"""]:::userStyle
+    end
+
+    %% Phase 2: Parallel Code Review
+    subgraph P2["🔍 PHASE 2: Parallel Code Review"]
+        direction LR
+        GEORGE["""🔵 George
+        Gemini CLI
+        Code Review"""]:::geminiStyle
+        OSCAR["""🟢 Oscar
+        OpenAI Codex CLI
+        Code Review"""]:::codexStyle
+    end
+
+    U1 -->|"Send code for review"| GEORGE
+    U1 -->|"Send code for review"| OSCAR
+
+    %% Phase 2B: Subagent collects reviews
+    subgraph P2B["🤖 PHASE 2B: Subagent Collection"]
+        SUBAGENT["""🟣 Claude Code Subagent
+        Collects both reviews,
+        packages with critical
+        thinking prompt, and
+        numbers all suggestions"""]:::subagentStyle
+    end
+
+    GEORGE -->|"George's feedback"| SUBAGENT
+    OSCAR -->|"Oscar's feedback"| SUBAGENT
+
+    %% Phase 3: Critical Review Prompt
+    subgraph P3["🧠 PHASE 3: Critical Analysis by Claude Code"]
+        direction TB
+        PROMPT["""📋 Framing Prompt to Claude Code:
+        'Two friends reviewed your code — they could be wrong.
+        They often over-engineer, take shortcuts, or miss
+        business goals and project requirements.
+        Don't assume this is accurate. But let's do
+        high-quality work we're proud of that breezes
+        through PR review. What do you think?'"""]:::promptStyle
+
+        PROMPT --- FB1["""### Begin George feedback ###
+        Gemini CLI review
+        ### End George feedback ###"""]:::geminiStyle
+
+        PROMPT --- FB2["""### Begin Oscar feedback ###
+        Codex CLI review
+        ### End Oscar feedback ###"""]:::codexStyle
+    end
+
+    SUBAGENT -->|"Assembled review package"| PROMPT
+
+    %% Phase 4: Bucket Triage with Numbered Items
+    subgraph P4["✅ PHASE 4: Claude Code Triages into Numbered Buckets"]
+        direction LR
+        B1["""🟢 BUCKET 1
+        Absolutely Should Do
+
+        1. Fix null check in auth
+        2. Add input validation
+        3. Remove dead code
+        ..."""]:::bucketGood
+        B2["""🟡 BUCKET 2
+        Let's Talk About This
+
+        4. Refactor to strategy pattern
+        5. Add caching layer
+        6. Split into microservice
+        ..."""]:::bucketTalk
+        B3["""🔴 BUCKET 3
+        Bad Idea / Over-Engineering
+
+        7. Rewrite in Rust
+        8. Add GraphQL layer
+        9. Custom ORM wrapper
+        ..."""]:::bucketBad
+    end
+
+    PROMPT -->|"Evaluate each suggestion against project context"| CC2["""🟣 Claude Code
+    Critically Analyzes and
+    Numbers All Suggestions"""]:::claudeStyle
+
+    CC2 --> B1
+    CC2 --> B2
+    CC2 --> B3
+
+    %% Phase 5: User Decision by Number
+    subgraph P5["🚀 PHASE 5: Resolution"]
+        direction TB
+        U3["""👤 User Reviews Numbered List
+        'Do items 1, 3, 5, 9'
+        'Skip items 7, 8'
+        'Let's discuss 4 and 6'"""]:::userStyle
+        IMPL["""🟣 Claude Code
+        Implements selected items"""]:::claudeStyle
+        PR["""🎯 PR Ready
+        High-Quality Code"""]:::claudeStyle
+    end
+
+    B1 --> U3
+    B2 --> U3
+    B3 --> U3
+    U3 -->|"User picks by number"| IMPL
+    IMPL --> PR
