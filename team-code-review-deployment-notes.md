@@ -46,6 +46,7 @@ User picks items by number ("Do 1, 3, 5 / Skip 7, 8 / Discuss 4") and Claude imp
 - Separates collection (subagent) from analysis (main conversation) for clean responsibility split
 - If invoked with no arguments, prompts user via AskUserQuestion (PR, files, or staged changes)
 - Accepts inline arguments: `/team-code-review PR #42 focus on error handling`
+- **Context-efficient diff handling:** Diff is saved to `/tmp/review-raw-diff.txt` via Bash, never loaded into the main conversation context. The main conversation only reads `gh pr view` for PR metadata. After reviews return, Claude reads only the specific files/lines flagged by reviewers — not the entire diff. This avoids consuming the diff in context three times.
 
 ### Output Format
 
@@ -63,6 +64,8 @@ Two-part output enforced by a full 9-item example in the SKILL.md:
 | **Analysis** | Plain English assessment — what the issue is, why it matters, what to do |
 
 Each finding separated by a `---` horizontal rule. The consistent structure means every item reads the same way — description, where, code, why.
+
+**Tone rule:** Detailed findings present each reviewer's feedback neutrally. No judgement language ("False positive", "Over-engineering", "Bikeshedding"). The analysis provides factual technical context — the executive summary is the only place where do/skip/discuss triage lives. Attribution says *(George)*, *(Oscar)*, or *(George and Oscar)* depending on who flagged it.
 
 ---
 
@@ -115,8 +118,8 @@ The log records raw vs. filtered diff size for transparency.
 
 #### Execution and Reliability
 
-- Pseudo-parallel via Bash `&` + `wait`
-- 3-minute timeout per reviewer via `timeout 180`
+- **True parallel execution:** Both reviewers launched in a single Bash tool call with `&` + `wait` so they run concurrently (separate Bash calls would be sequential)
+- 15-minute timeout per reviewer via `timeout 900`
 - **Single retry** on non-timeout failures (exit != 0 and exit != 124) before marking as unavailable
 - Graceful degradation: if one reviewer fails even after retry, the other's output is still returned
 - Both attempts logged in the review log for troubleshooting

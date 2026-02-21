@@ -15,12 +15,16 @@ The user's input: `$ARGUMENTS`
 
 Parse the input to determine what to review. The user may provide any of these:
 
-- **PR number** (e.g., `PR #42`, `pr 42`, `#42`) — Run `gh pr diff 42` to get the changes and `gh pr view 42` for context
-- **File paths** (e.g., `src/auth.ts src/middleware.ts`) — Read those files directly
-- **Branch name** (e.g., `feature/payments`) — Run `git diff main...feature/payments` to get the changes
-- **"staged"** or **"uncommitted"** — Run `git diff --staged` or `git diff` respectively
+- **PR number** (e.g., `PR #42`, `pr 42`, `#42`) — Run `gh pr view 42` to get the PR title, description, and metadata. Save the diff to a file with `gh pr diff 42 > /tmp/review-raw-diff.txt`
+- **File paths** (e.g., `src/auth.ts src/middleware.ts`) — Note the file paths (do NOT read them into context yet)
+- **Branch name** (e.g., `feature/payments`) — Save the diff to a file with `git diff main...feature/payments > /tmp/review-raw-diff.txt`
+- **"staged"** or **"uncommitted"** — Save the diff to a file with `git diff --staged > /tmp/review-raw-diff.txt` or `git diff > /tmp/review-raw-diff.txt`
 - **Review notes** (e.g., `focus on error handling in the payment flow`) — Use as guidance for what to emphasize, and ask the user which files or PR to apply it to
 - **Combination** (e.g., `PR #42 focus on the auth changes`) — Parse the PR number AND pass the notes as review focus
+
+**IMPORTANT: Do NOT read the diff into your conversation context.** Save it to `/tmp/review-raw-diff.txt` and let the review-collector subagent work from that file. This avoids consuming the diff in context three times (main conversation + subagent + analysis). You will read specific files/lines later when analyzing findings — not the full diff.
+
+For PR reviews, DO run `gh pr view` to get the title and description (small, useful context). Do NOT run `gh pr diff` into your context.
 
 If `$ARGUMENTS` is empty, **STOP and ask the user before doing anything else.** Use AskUserQuestion with these options:
 
@@ -32,17 +36,21 @@ Options:
 
 After the user responds, follow up to get the specifics (PR number, file paths, focus notes, etc.) before proceeding to Step 2.
 
-Once you have the code, read the relevant files/diff to understand it yourself before sending for review.
-
 ## Step 2: Delegate to the Review Collector
 
 Use the **review-collector** subagent to invoke both Gemini CLI and Codex CLI. Pass it:
-- The file paths or diff to review
+- The review mode (PR number, file paths, staged, uncommitted, branch)
+- The path to the diff file (`/tmp/review-raw-diff.txt`) if applicable
+- Any focus notes from the user
 - Any relevant project context (tech stack, conventions from CLAUDE.md, etc.)
 
-The subagent will return an assembled review package with all suggestions numbered sequentially.
+The subagent will filter the diff, send it to both reviewers, and return an assembled review package with all suggestions numbered sequentially.
 
-## Step 3: Critically Analyze the Reviews
+## Step 3: Read Code for Specific Findings
+
+After receiving the review package, **now** read the specific files and lines referenced in each finding. Do NOT read the entire diff — only read the files/lines that the reviewers flagged. This gives you the code context needed for analysis while keeping context usage minimal.
+
+## Step 4: Critically Analyze the Reviews
 
 **This is the most important step.** Apply this framing:
 
@@ -55,7 +63,7 @@ For EACH numbered suggestion, evaluate it against:
 - **Over-engineering risk**: Is it adding unnecessary complexity, abstraction, or premature optimization?
 - **Best practices**: Is it genuinely best practice, or just stylistic preference?
 
-## Step 4: Triage into 3 Buckets
+## Step 5: Triage into 3 Buckets
 
 Present ALL suggestions organized into these three buckets, keeping the original numbers:
 
@@ -68,7 +76,7 @@ Suggestions that have merit but involve tradeoffs, are context-dependent, or whe
 ### BUCKET 3: Bad Idea / Over-Engineering
 Suggestions you disagree with. Explain briefly WHY each is a bad idea for this project (over-engineering, wrong pattern, stylistic preference disguised as best practice, etc.).
 
-## Step 5: Present for User Action
+## Step 6: Present for User Action
 
 After presenting the buckets, tell the user:
 
@@ -77,7 +85,7 @@ After presenting the buckets, tell the user:
 > - "Skip 7, 8" — acknowledged, moving on
 > - "Discuss 4" — let's talk about this one
 
-## Step 6: Implement
+## Step 7: Implement
 
 After the user picks:
 - Implement all "Do" items
@@ -124,9 +132,22 @@ Follow this example output EXACTLY. The executive summary comes first, then deta
 
 ### Detailed Findings
 
+The detailed findings section is NOT where you pass judgement. The executive summary already has the do/skip/discuss triage. This section presents each reviewer's feedback neutrally so the user can see the details and evaluate for themselves.
+
+**Attribution rules:**
+- If only George flagged it: *(George)*
+- If only Oscar flagged it: *(Oscar)*
+- If both flagged it independently: *(George and Oscar)*
+
+**Tone rules:**
+- Do NOT use judgement language like "False positive", "Over-engineering", "Bikeshedding", "Bad suggestion"
+- DO present what the reviewer found, show the code, and provide factual technical context
+- The analysis should help the user understand the issue — not tell them it's wrong or right
+- Let the executive summary handle the triage; the details just show the evidence
+
 ---
 
-**#1** — Flask app has no authentication or login gate *(George)*
+**#1** — No authentication or login gate on Flask admin app *(George)*
 
 **File:** `admin/app.py:792`
 
@@ -135,7 +156,7 @@ if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=False)
 ```
 
-**Analysis:** This sounds alarming in the abstract, but this is a local admin interface bound to `127.0.0.1`. Adding Flask-Login, user registration, password management, and session handling would be significant complexity for a tool that's essentially a local dashboard. If this ever binds to `0.0.0.0`, auth becomes critical — but right now this is over-engineering for the deployment model.
+**Analysis:** George flags the lack of authentication on the admin interface. The app is currently bound to `127.0.0.1` (localhost only, line 792). Adding Flask-Login would require user registration, password management, and session handling. If the app were bound to `0.0.0.0`, auth would become critical.
 
 ---
 
@@ -150,7 +171,7 @@ ACCOUNT_EMAIL = "user@example.com"
 VOICEMAIL_PIN = "1234"
 ```
 
-**Analysis:** This is a real concern if the repo is public or shared. The DID, home address, and email are in the source. That said, this is a one-time setup script designed to be run once, and moving everything to `.env` makes the script harder to understand and use. Worth discussing: is this repo public? If so, these should absolutely be parameterized. If it stays private, the risk is lower.
+**Analysis:** George flags the DID, home address, and email sitting directly in source. This is a one-time setup script designed to run once with project-specific constants. Moving them to `.env` would parameterize them but makes the script harder to follow. The risk depends on whether this repo is public or private.
 
 ---
 
@@ -162,7 +183,7 @@ VOICEMAIL_PIN = "1234"
 <button onclick="confirm('Delete {{ contact.name }}?')">
 ```
 
-**Analysis:** If `contact.name` contains an apostrophe (e.g., O'Brien), this breaks the JS string. Worse, a crafted name could execute arbitrary code. Fix: use `{{ contact.name|tojson }}` which properly escapes for JS string contexts.
+**Analysis:** George flags that if `contact.name` contains an apostrophe (e.g., O'Brien), the inline JS string breaks. A crafted name could execute arbitrary code. The fix would be `{{ contact.name|tojson }}` which properly escapes for JS string contexts.
 
 ---
 
@@ -178,7 +199,7 @@ VOICEMAIL_PIN = "1234"
     <Phone><phonenumber>5551234567</phonenumber></Phone>
 ```
 
-**Analysis:** This is a generated file containing PII (real names and phone numbers of family members). It should be in `.gitignore`, not committed. Simple one-liner fix.
+**Analysis:** George flags that this generated file contains PII (real names and phone numbers of family members) and is tracked in git. Adding it to `.gitignore` is a one-liner.
 
 ---
 
@@ -194,7 +215,7 @@ def normalize_phone(number: str) -> str:
     return digits
 ```
 
-**Analysis:** The function strips non-digits and handles the 1+10 → 10 case, but doesn't reject invalid lengths or handle 7-digit local numbers. VoIP.ms CallerID filtering uses 10-digit NANPA, so an invalid-length entry would silently fail to match. The question is whether this is a real scenario — if contacts are always entered as full 10-digit numbers, the current code is fine. If the form might receive 7-digit or international numbers, validation would prevent confusing silent failures.
+**Analysis:** George flags that the function strips non-digits and handles 1+10 → 10, but doesn't reject invalid lengths or handle 7-digit local numbers. VoIP.ms CallerID filtering uses 10-digit NANPA, so an invalid-length entry would silently fail to match. Whether this matters depends on whether contacts are always entered as full 10-digit numbers.
 
 ---
 
@@ -211,7 +232,7 @@ phone = ET.SubElement(entry, 'Phone')
 ET.SubElement(phone, 'phonenumber').text = number
 ```
 
-**Analysis:** Yes, the code is nearly identical in both places. But this is a small, stable piece of logic — the XML format is dictated by Grandstream hardware and won't change. Extracting it into a shared module adds a new file, a new import path, and coupling between two components that currently work independently. The pragmatic choice is to leave them separate unless you're actively iterating on the format.
+**Analysis:** George flags nearly identical XML builder code in both files. The XML format is dictated by Grandstream hardware. Extracting to a shared module would add a file and import path. The two components currently work independently.
 
 ---
 
@@ -223,7 +244,7 @@ ET.SubElement(phone, 'phonenumber').text = number
 self.base_url = f"http://{phone_ip}"
 ```
 
-**Analysis:** The Grandstream GHP631W hotel phone almost certainly doesn't support HTTPS on its management interface. This is communicating on a local network with a consumer VoIP phone. HTTPS is technically correct but practically impossible given the hardware.
+**Analysis:** George flags the use of HTTP rather than HTTPS for the Grandstream phone management API. The GHP631W communicates on the local network. Whether the device's management interface supports HTTPS depends on the firmware.
 
 ---
 
@@ -237,7 +258,7 @@ flash("DND toggle failed", "danger")        # line 425
 flash("Phone unreachable", "warning")       # line 438
 ```
 
-**Analysis:** The flash categories (warning vs danger) are used appropriately in context — `warning` for non-critical issues, `danger` for failures. The `_get_phone_status` returning defaults on failure is intentional — the troubleshoot page already shows health flags. This is bikeshedding.
+**Analysis:** George flags that some failures use "warning" while others use "danger". The current usage is `warning` for non-critical issues and `danger` for hard failures. `_get_phone_status` returns defaults on failure; the troubleshoot page shows separate health flags.
 
 ---
 
@@ -253,10 +274,10 @@ def _is_dnd_active(self):
             if f['routing'] == 'voicemail':
                 return True
             return False
-    return True  # BUG: empty list falls through here
+    return True  # empty list falls through here
 ```
 
-**Analysis:** If a filter ID in `.env` becomes stale (deleted on VoIP.ms), the function iterates over an empty list, never enters the loop, and falls through to `return True`. This incorrectly reports DND as active, which means toggling DND would try to disable it when it was never actually enabled. Fix: add `if not filters: return False` at the top.
+**Analysis:** Oscar flags that if a filter ID in `.env` becomes stale (deleted on VoIP.ms), the function iterates over an empty list, never enters the loop, and falls through to `return True`. This reports DND as active when it isn't. A guard like `if not filters: return False` at the top would handle this case.
 
 ---
 

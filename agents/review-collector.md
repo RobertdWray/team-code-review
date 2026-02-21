@@ -106,42 +106,22 @@ echo "Diff filtered: ${RAW_SIZE} bytes → ${FILTERED_SIZE} bytes"
 
 If the filtered diff is empty, warn the caller that all changes were auto-generated and there's nothing to review.
 
-### Step 3: Invoke Both Reviewers
+### Step 3: Invoke Both Reviewers IN PARALLEL
+
+**CRITICAL: Launch both reviewers in a SINGLE Bash command** so they run truly concurrently. Do NOT use separate Bash tool calls — that would run them sequentially. Both commands go in one script with `&` for backgrounding and `wait` to collect results.
 
 **CRITICAL: For PR reviews, NEVER rely on `codex review --base main`.** That command reviews the currently checked-out branch, which may NOT be the PR branch. Always use the captured diff from Step 2 instead.
 
-#### Oscar (Codex CLI)
-
-Choose the invocation based on review mode:
-
-**For PR reviews or branch reviews** (where the user may not be on the target branch):
-Use `codex exec` with the filtered diff piped via stdin and a review-focused prompt. Do NOT use `codex review --base` because it depends on the checked-out branch.
+**For PR or branch reviews**, run this as ONE Bash tool call:
 
 ```bash
 FOCUS_NOTES="[user's focus notes or empty]"
-cat /tmp/review-filtered-diff.txt | timeout 180 codex exec "You are performing a code review on the following diff. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
-CODEX_PID=$!
-```
 
-**For uncommitted/staged reviews** (where the user IS on the correct branch):
-Use the native `codex review` subcommand — it works correctly here.
-
-```bash
-# Uncommitted
-timeout 180 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+# Launch BOTH reviewers simultaneously
+cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following diff. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
 CODEX_PID=$!
 
-# Staged (also use --uncommitted, which includes staged)
-timeout 180 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
-CODEX_PID=$!
-```
-
-#### George (Gemini CLI)
-
-Gemini does NOT have a built-in review command. Use headless mode with the filtered diff piped via stdin for ALL review modes.
-
-```bash
-cat /tmp/review-filtered-diff.txt | timeout 180 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
+cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 - Auto-generated files (even if some slipped through filtering)
@@ -153,27 +133,77 @@ If you are unsure whether a file is authored code or generated/reference materia
 
 ${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
 GEMINI_PID=$!
+
+# Wait for BOTH to finish
+wait $CODEX_PID
+CODEX_EXIT=$?
+wait $GEMINI_PID
+GEMINI_EXIT=$?
+
+echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 ```
 
-**For file-based reviews (not diffs):**
+**For uncommitted/staged reviews**, run this as ONE Bash tool call:
+
 ```bash
-# Use @ references to include specific files in Gemini's context
-timeout 180 gemini -p "@src/auth.ts @src/middleware.ts Review these files. Provide a numbered list of specific, actionable findings. For each finding include: severity, file and line(s), what the issue is, and how to fix it.
+FOCUS_NOTES="[user's focus notes or empty]"
+
+# Launch BOTH reviewers simultaneously
+timeout 900 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+CODEX_PID=$!
+
+cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
+
+IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
+- Auto-generated files (even if some slipped through filtering)
+- Reference documentation or rule files (.mdc, .md guides)
+- Third-party code, vendored dependencies, or lock files
+- Configuration files that are standard boilerplate
+
+If you are unsure whether a file is authored code or generated/reference material, err on the side of skipping it.
+
+${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
+GEMINI_PID=$!
+
+# Wait for BOTH to finish
+wait $CODEX_PID
+CODEX_EXIT=$?
+wait $GEMINI_PID
+GEMINI_EXIT=$?
+
+echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
+```
+
+**For file-based reviews (not diffs)**, run this as ONE Bash tool call:
+
+```bash
+FOCUS_NOTES="[user's focus notes or empty]"
+
+# Launch BOTH reviewers simultaneously
+cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following files. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>&1 &
+CODEX_PID=$!
+
+timeout 900 gemini -p "@src/auth.ts @src/middleware.ts Review these files. Provide a numbered list of specific, actionable findings. For each finding include: severity, file and line(s), what the issue is, and how to fix it.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in auto-generated code, reference documentation, or boilerplate configuration.
 
 ${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>&1 &
 GEMINI_PID=$!
-```
 
-### Step 4: Wait, Retry on Failure, Collect, and Log
-
-```bash
+# Wait for BOTH to finish
 wait $CODEX_PID
 CODEX_EXIT=$?
 wait $GEMINI_PID
 GEMINI_EXIT=$?
+
+echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 ```
+
+**Why one Bash call matters:** If you use two separate Bash tool calls, Claude Code runs them sequentially — the second waits for the first to finish. By putting both `&` commands and the `wait` in a single script, they launch at the same time and run concurrently.
+
+### Step 4: Retry on Failure, Collect, and Log
+
+The `wait` calls and exit codes are already captured at the end of the Step 3 Bash script. Now check the results and retry if needed.
 
 #### Retry logic
 
@@ -184,7 +214,7 @@ If a reviewer failed (non-zero exit) but did NOT timeout (exit code 124), retry 
 if [ $CODEX_EXIT -ne 0 ] && [ $CODEX_EXIT -ne 124 ]; then
     echo "Oscar failed (exit $CODEX_EXIT), retrying once..."
     # Re-run the same command
-    cat /tmp/review-filtered-diff.txt | timeout 180 codex exec "..." > /tmp/oscar-review.txt 2>&1
+    cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "..." > /tmp/oscar-review.txt 2>&1
     CODEX_EXIT=$?
     CODEX_RETRIED=true
 fi
@@ -192,13 +222,13 @@ fi
 # Retry George if failed (not timeout)
 if [ $GEMINI_EXIT -ne 0 ] && [ $GEMINI_EXIT -ne 124 ]; then
     echo "George failed (exit $GEMINI_EXIT), retrying once..."
-    cat /tmp/review-filtered-diff.txt | timeout 180 gemini -p "..." --output-format text > /tmp/george-review.txt 2>&1
+    cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "..." --output-format text > /tmp/george-review.txt 2>&1
     GEMINI_EXIT=$?
     GEMINI_RETRIED=true
 fi
 ```
 
-**Do NOT retry on timeout (exit 124)** — if the reviewer hit 3 minutes, retrying will likely time out again.
+**Do NOT retry on timeout (exit 124)** — if the reviewer hit 15 minutes, retrying will likely time out again.
 
 After retries, if a reviewer still failed, proceed with the other reviewer's output and mark the failed one as unavailable.
 
@@ -276,7 +306,7 @@ If a reviewer failed (even after retry):
 ```
 ### Begin [Name] feedback ###
 
-[REVIEWER UNAVAILABLE: <error message or "timed out after 180 seconds">. Retried: yes/no]
+[REVIEWER UNAVAILABLE: <error message or "timed out after 900 seconds">. Retried: yes/no]
 
 ### End [Name] feedback ###
 ```
