@@ -2,13 +2,14 @@
 title: Team Code Review — Multi-Tool Review Workflow
 description: Skill + Subagent deployment for cross-tool code review using Gemini CLI and Codex CLI alongside Claude Code.
 created: 2026-02-21
-updated: 2026-02-22
+updated: 2026-02-23
 status: implementing
 tags: [claude-code, skill, subagent, team-code-review, gemini-cli, codex-cli]
 
 source_of_truth_for:
   - "Team Code Review Skill: /team-code-review slash command"
   - "Review Collector Subagent: Gemini + Codex CLI orchestration"
+  - "Team Research Agent: Pre-review documentation researcher"
   - "Multi-Tool Review Workflow: 3-bucket triage system"
 
 related:
@@ -46,7 +47,7 @@ User picks items by number ("Do 1, 3, 5 / Skip 7, 8 / Discuss 4") and Claude imp
 - Separates collection (subagent) from analysis (main conversation) for clean responsibility split
 - If invoked with no arguments, prompts user via AskUserQuestion (PR, files, or staged changes)
 - Accepts inline arguments: `/team-code-review PR #42 focus on error handling`
-- **Context-efficient diff handling:** Diff is saved to `/tmp/review-raw-diff.txt` via Bash, never loaded into the main conversation context. The main conversation only reads `gh pr view` for PR metadata. After reviews return, Claude reads only the specific files/lines flagged by reviewers — not the entire diff. This avoids consuming the diff in context three times.
+- **Context-efficient diff handling:** Diff is saved to an isolated temp folder (`$REVIEW_TMP/review-raw-diff.txt`) via Bash, never loaded into the main conversation context. The main conversation only reads `gh pr view` for PR metadata. After reviews return, Claude reads only the specific files/lines flagged by reviewers — not the entire diff. This avoids consuming the diff in context three times.
 
 ### Output Format
 
@@ -84,14 +85,14 @@ Subagent that invokes Gemini CLI ("George") and Codex CLI ("Oscar") via Bash in 
 
 #### Diff Capture Strategy (branch-agnostic)
 
-For PR and branch reviews, the diff is captured via `gh pr diff` or `git diff` into a temp file and piped to both reviewers via stdin. This ensures **neither reviewer depends on the checked-out branch** — solving the problem where `codex review --base main` reviewed the wrong changeset when the user wasn't on the PR branch.
+For PR and branch reviews, the diff is captured via `gh pr diff` or `git diff` into a temp file. George receives the diff piped via stdin. Oscar receives the diff **embedded in a prompt file** (`$REVIEW_TMP/oscar-prompt.md`) fed via `codex exec --sandbox read-only - < $REVIEW_TMP/oscar-prompt.md` — because `codex exec "string"` ignores piped stdin (see Stdin Gotcha below). This ensures **neither reviewer depends on the checked-out branch**.
 
 | Review mode | Diff capture | Oscar invocation | George invocation |
 |-------------|-------------|-----------------|-------------------|
-| PR review | `gh pr diff <N>` | `codex exec` with diff via stdin | `gemini -p` with diff via stdin |
-| Branch review | `git diff main...<branch>` | `codex exec` with diff via stdin | `gemini -p` with diff via stdin |
+| PR review | `gh pr diff <N>` | `codex exec --sandbox read-only -` with diff embedded in prompt file via stdin | `gemini -p` with diff via stdin |
+| Branch review | `git diff main...<branch>` | `codex exec --sandbox read-only -` with diff embedded in prompt file via stdin | `gemini -p` with diff via stdin |
 | Uncommitted/staged | `git diff` / `git diff --staged` | `codex review --uncommitted` (native) | `gemini -p` with diff via stdin |
-| Specific files | Read files directly | `codex exec` with files in prompt | `gemini -p` with `@file` references |
+| Specific files | Read files directly | `codex exec --sandbox read-only -` with files embedded in prompt file via stdin | `gemini -p` with `@file` references |
 
 #### Diff Pre-Filtering
 
@@ -104,7 +105,8 @@ The log records raw vs. filtered diff size for transparency.
 #### Reviewer-Specific Details
 
 **Oscar (Codex CLI):**
-- For PR/branch reviews: `codex exec` with filtered diff piped via stdin and a review-focused prompt (NOT `codex review --base` which is branch-dependent)
+- For PR/branch reviews: Diff is embedded in a prompt file (`$REVIEW_TMP/oscar-prompt.md`) and fed via `codex exec --sandbox read-only - < $REVIEW_TMP/oscar-prompt.md`. The `-` placeholder tells Codex to read the prompt from stdin. `--sandbox read-only` prevents filesystem writes and reduces autonomous exploration.
+- **Stdin gotcha:** `codex exec "prompt string"` ignores piped stdin entirely — the diff goes nowhere. Confirmed by OpenAI Cookbook, CLI reference, and [GitHub Issue #1123](https://github.com/openai/codex/issues/1123). The fix is to embed the diff in the prompt text and pipe the whole file via `codex exec -`.
 - For uncommitted/staged: `codex review --uncommitted` (native subcommand — works correctly when user is on the right branch)
 - Accepts custom focus notes as the prompt argument
 - Reads `AGENTS.md` for project-specific review context automatically
@@ -146,7 +148,7 @@ In the first live run, George's actual findings were ~30 lines buried in ~120 li
 
 Every review run saves a full log to `~/Downloads/` for troubleshooting:
 
-- **File:** `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md`
+- **File:** `~/Downloads/team-review-YYYYMMDD-HHMMSS-reponame-scope-shorthash.md` (e.g., `team-review-20260223-165406-TrayVerify-pr42-abc1234.md`)
 - **Contains:** Date, review scope, files reviewed (file count + additions/deletions), focus notes, diff size (raw → filtered with excluded file count), exit codes, retry status
 - **Three sections per reviewer:**
   1. **Cleaned Review Output** — just the findings, with CLI noise stripped (what gets sent for analysis)
@@ -158,15 +160,83 @@ Every review run saves a full log to `~/Downloads/` for troubleshooting:
 ### Technical Considerations
 
 - Codex `review` is branch-dependent — only used for uncommitted/staged where branch is correct
-- Codex `exec` is branch-agnostic — used for PR/branch reviews with diff piped via stdin
+- Codex `exec` is branch-agnostic — used for PR/branch reviews with diff embedded in prompt file, `--sandbox read-only` to prevent filesystem writes
 - Gemini has 1M token context (can review entire medium codebases); Codex context varies by model
 - User focus notes (e.g., "focus on auth changes") are passed through to both reviewers
-- Temp working files cleaned up after log is saved (includes stderr files)
+- **Concurrent-safe temp folder:** Each review run creates an isolated folder at `/tmp/team-review-YYYYMMDD-HHMMSS-reponame-scope-shorthash/`. All working files (diffs, prompts, reviewer output, stderr) live inside. The folder name matches the log file name for easy correlation. The entire folder is cleaned up with `rm -rf` after the log is saved
 - Error output (stderr) captured to separate files from review output (stdout) — prevents rate limit stack traces, deprecation warnings, and MCP errors from burying review findings
 
 ---
 
-## 3. Future: MCP Server Upgrade
+## 3. team-research-agent Subagent
+
+**Status:** Implementing
+**Priority:** Medium
+**Added:** February 2026
+**Location:** `~/.claude/agents/team-research-agent.md`
+
+### Description
+
+Pre-review documentation researcher that analyzes diffs to identify the key libraries/frameworks/APIs being changed, then researches their latest documentation, security advisories, and common mistakes. Writes research files that the review-collector injects into reviewer prompts. Does NOT review code — only researches the tools the code uses.
+
+### Key Design Decisions
+
+- **Separate agent, not embedded in review-collector:** The review-collector is explicitly a "mechanical collection only" agent. Adding web research would violate its separation of concerns. The research agent has a distinct responsibility — it gathers knowledge, not reviews.
+- **Reads raw diff, not filtered:** The research agent needs to see `package.json`, `requirements.txt`, `Cargo.toml`, etc. to identify version changes and new dependencies. These files get stripped by the review-collector's diff filter, so the research agent reads `$REVIEW_TMP/review-raw-diff.txt` directly.
+- **Prompt injection, not file references:** Research context is compiled into a compact text block and injected directly into George and Oscar's prompts. This is necessary because Codex `exec` processes piped stdin and can't read external files during execution. Injecting into the prompt text ensures uniform behavior across all review modes.
+- **Enhancement, not a requirement:** If the research agent fails, times out, or finds nothing to research, the review workflow proceeds normally without research context. Partial research (2 out of 4 topics) is also valid.
+
+### Research Strategy
+
+1. **Diff analysis** — Scan `+` lines for imports, API calls, framework patterns, dependency file changes
+2. **Topic prioritization** — Rank by: security-relevant > breaking changes > framework conventions > new deps > complex integrations. Max 5 topics, typically 2-3.
+3. **Web search** — For each topic: official docs, security advisories (`"{library}" CVE`), common mistakes, migration guides for version bumps
+4. **File writing** — One markdown file per topic with structured sections: Key Documentation Points, Common Mistakes, Security Considerations (if applicable), Sources
+
+### Output Folder Structure
+
+```
+~/Downloads/Team-Research/{yyyymmddhhmmss}-{reponame}-{scope}-{short-hash}/
+├── research-flask-security.md
+├── research-sqlalchemy-queries.md
+└── research-jwt-authentication.md
+```
+
+The folder name is dynamically constructed:
+- **Timestamp:** `yyyymmddhhmmss` for sorting and uniqueness
+- **Repo name:** from the current git repository
+- **Scope:** a concise slug the agent determines from context (e.g., `pr42`, `feature-auth`, `staged`, `uncommitted`)
+- **Short hash:** `git rev-parse --short HEAD` for searchability
+
+### Integration Points
+
+- **SKILL.md Step 1.5** invokes the research agent after diff capture and before review collection
+- **review-collector Step 1** reads research files and compiles `RESEARCH_CONTEXT`
+- **review-collector Step 3** injects `RESEARCH_CONTEXT` into both George and Oscar's prompts
+- **review-collector Step 4** logs which research files were consumed
+- **review-collector cleanup** deletes the research folder after the review log is saved
+
+### Time Budget and Limits
+
+- Max 5 research topics per review
+- Target 2-3 minutes total research time
+- 30-45 seconds per topic
+- WebSearch failures → skip that topic, don't retry
+
+### Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Research agent timeout/crash | SKILL.md proceeds to Step 2 without research |
+| WebSearch fails for a topic | Agent skips that topic, continues with others |
+| Partial success (2 of 4 topics) | Writes whatever was found — partial research is still valuable |
+| Trivial diff (README-only) | Returns "Research skipped" with no folder created |
+| Research folder missing at review time | review-collector sets RESEARCH_CONTEXT to empty, proceeds normally |
+| Cleanup failure | Research folder persists in ~/Downloads (small markdown files, user can clean manually) |
+
+---
+
+## 4. Future: MCP Server Upgrade
 
 **Status:** Planned
 **Priority:** Low

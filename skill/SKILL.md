@@ -9,20 +9,42 @@ disable-model-invocation: true
 
 You are orchestrating a multi-tool code review. Two external AI reviewers — **George** (Gemini CLI) and **Oscar** (Codex CLI) — will independently review the code. You will then critically analyze their suggestions and present them to the user for action.
 
+## Step 0: Create a Unique Temp Folder
+
+Before doing anything else, create an isolated temp folder for this review run. This prevents concurrent reviews from clobbering each other's files.
+
+```bash
+REPO_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")
+SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "0000000")
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+# Scope will be filled in during Step 1 (e.g., pr42, staged, feat-auth)
+```
+
+After parsing the user's input in Step 1, finalize the folder:
+
+```bash
+REVIEW_TMP="/tmp/team-review-${TIMESTAMP}-${REPO_NAME}-${SCOPE}-${SHORT_HASH}"
+mkdir -p "$REVIEW_TMP"
+```
+
+All temp files for this review go inside `$REVIEW_TMP/`. Pass `$REVIEW_TMP` to both subagents.
+
 ## Step 1: Identify the Code to Review
 
 The user's input: `$ARGUMENTS`
 
 Parse the input to determine what to review. The user may provide any of these:
 
-- **PR number** (e.g., `PR #42`, `pr 42`, `#42`) — Run `gh pr view 42` to get the PR title, description, and metadata. Save the diff to a file with `gh pr diff 42 > /tmp/review-raw-diff.txt`
-- **File paths** (e.g., `src/auth.ts src/middleware.ts`) — Note the file paths (do NOT read them into context yet)
-- **Branch name** (e.g., `feature/payments`) — Save the diff to a file with `git diff main...feature/payments > /tmp/review-raw-diff.txt`
-- **"staged"** or **"uncommitted"** — Save the diff to a file with `git diff --staged > /tmp/review-raw-diff.txt` or `git diff > /tmp/review-raw-diff.txt`
+- **PR number** (e.g., `PR #42`, `pr 42`, `#42`) — Set `SCOPE="pr42"`. Run `gh pr view 42` to get the PR title, description, and metadata. Save the diff to a file with `gh pr diff 42 > "$REVIEW_TMP/review-raw-diff.txt"`
+- **File paths** (e.g., `src/auth.ts src/middleware.ts`) — Set `SCOPE="files"`. Note the file paths (do NOT read them into context yet)
+- **Branch name** (e.g., `feature/payments`) — Set `SCOPE` to a slug of the branch name (e.g., `feat-payments`). Save the diff to a file with `git diff main...feature/payments > "$REVIEW_TMP/review-raw-diff.txt"`
+- **"staged"** or **"uncommitted"** — Set `SCOPE="staged"` or `SCOPE="uncommitted"`. Save the diff to a file with `git diff --staged > "$REVIEW_TMP/review-raw-diff.txt"` or `git diff > "$REVIEW_TMP/review-raw-diff.txt"`
 - **Review notes** (e.g., `focus on error handling in the payment flow`) — Use as guidance for what to emphasize, and ask the user which files or PR to apply it to
 - **Combination** (e.g., `PR #42 focus on the auth changes`) — Parse the PR number AND pass the notes as review focus
 
-**IMPORTANT: Do NOT read the diff into your conversation context.** Save it to `/tmp/review-raw-diff.txt` and let the review-collector subagent work from that file. This avoids consuming the diff in context three times (main conversation + subagent + analysis). You will read specific files/lines later when analyzing findings — not the full diff.
+After setting `SCOPE`, create the `$REVIEW_TMP` folder as shown in Step 0.
+
+**IMPORTANT: Do NOT read the diff into your conversation context.** Save it to `$REVIEW_TMP/review-raw-diff.txt` and let the review-collector subagent work from that folder. This avoids consuming the diff in context three times (main conversation + subagent + analysis). You will read specific files/lines later when analyzing findings — not the full diff.
 
 For PR reviews, DO run `gh pr view` to get the title and description (small, useful context). Do NOT run `gh pr diff` into your context.
 
@@ -36,15 +58,34 @@ Options:
 
 After the user responds, follow up to get the specifics (PR number, file paths, focus notes, etc.) before proceeding to Step 2.
 
+## Step 1.5: Delegate to the Research Agent
+
+Before sending code to reviewers, gather documentation context for the libraries and APIs being changed. Use the **team-research-agent** subagent. Pass it:
+- The path to the raw diff file (`$REVIEW_TMP/review-raw-diff.txt`)
+- The review scope (PR number, branch name, staged, uncommitted, file paths)
+- The repository name
+- Any focus notes from the user
+
+The research agent will:
+1. Analyze the raw diff to identify key libraries/frameworks/APIs being changed
+2. WebSearch for latest docs, security advisories, and common mistakes
+3. Write research files to a folder in `~/Downloads/Team-Research/`
+4. Return the research folder path and a summary of topics researched
+
+**Capture the research folder path** from the subagent's response. You'll pass this to the review-collector in the next step.
+
+**If the research agent fails, times out, or returns "Research skipped":** Proceed to Step 2 without research. Research is an enhancement, not a requirement — the review workflow works fine without it.
+
 ## Step 2: Delegate to the Review Collector
 
 Use the **review-collector** subagent to invoke both Gemini CLI and Codex CLI. Pass it:
 - The review mode (PR number, file paths, staged, uncommitted, branch)
-- The path to the diff file (`/tmp/review-raw-diff.txt`) if applicable
+- **The temp folder path** (`$REVIEW_TMP`) — the diff is at `$REVIEW_TMP/review-raw-diff.txt`
 - Any focus notes from the user
 - Any relevant project context (tech stack, conventions from CLAUDE.md, etc.)
+- **The research folder path** from Step 1.5 (if research was performed), or indicate that no research is available
 
-The subagent will filter the diff, send it to both reviewers, and return an assembled review package with all suggestions numbered sequentially.
+The subagent will read the research files, inject documentation context into both reviewer prompts, filter the diff, send it to both reviewers, and return an assembled review package with all suggestions numbered sequentially.
 
 ## Step 3: Read Code for Specific Findings
 

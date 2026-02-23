@@ -22,15 +22,31 @@ The result is higher-quality code reviews that catch real issues while filtering
   Claude Code (main conversation)
   ├── Saves diff to temp file (NOT into conversation context)
   ├── Gets PR title/description only
-  └── Delegates to review-collector subagent
+  └── Delegates to team-research-agent subagent
+        |
+        v
+  team-research-agent subagent
+  ├── Reads raw diff (sees package.json, requirements.txt, etc.)
+  ├── Identifies 3-5 key libraries/frameworks/APIs being changed
+  ├── WebSearch for latest docs, security advisories, deprecations
+  ├── Writes research files to ~/Downloads/Team-Research/
+  └── Returns research folder path + topic summary
+        |
+        v
+  Claude Code (main conversation)
+  └── Delegates to review-collector subagent (with research folder path)
         |
         v
   review-collector subagent
+  ├── Reads research files → compiles compact RESEARCH_CONTEXT
+  ├── Injects RESEARCH_CONTEXT into George + Oscar prompts
   ├── Filters out auto-generated files from diff
   ├── Sends filtered diff to George and Oscar in parallel
   ├── 15-min timeout per reviewer, 1 retry on failure
   ├── Cleans CLI noise from output (keeps raw in log)
   ├── Numbers all suggestions sequentially
+  ├── Logs research context consumed
+  ├── Deletes research folder after log is saved
   └── Returns assembled review package
         |
         v
@@ -57,17 +73,18 @@ All three CLI tools installed and authenticated:
 
 See [Setup-guide.md](Setup-guide.md) for detailed installation, authentication, and configuration for all three tools.
 
-### Deploy the Skill and Subagent
+### Deploy the Skill and Subagents
 
-Copy the two files to your global Claude Code config:
+Copy the three files to your global Claude Code config:
 
 ```bash
 # Skill (creates the /team-code-review slash command)
 mkdir -p ~/.claude/skills/team-code-review
 cp skill/SKILL.md ~/.claude/skills/team-code-review/SKILL.md
 
-# Subagent (handles Gemini + Codex invocation)
+# Subagents
 cp agents/review-collector.md ~/.claude/agents/review-collector.md
+cp agents/team-research-agent.md ~/.claude/agents/team-research-agent.md
 ```
 
 That's it. The skill is now available as `/team-code-review` in every Claude Code session.
@@ -131,7 +148,7 @@ escape for JS string contexts.
 
 ## Review Logging
 
-Every run saves a full log to `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md` containing:
+Every run saves a full log to `~/Downloads/team-review-YYYYMMDD-HHMMSS-reponame-scope-shorthash.md` containing:
 - Review scope, file count with additions/deletions, focus notes
 - Raw vs. filtered diff size with excluded file count
 - Three sections per reviewer:
@@ -142,8 +159,9 @@ Every run saves a full log to `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md` con
 
 ## Key Design Decisions
 
-- **Context-efficient** — Diff is saved to a temp file, never loaded into the main conversation. Claude reads only the specific files/lines referenced in findings, not the entire diff
-- **Branch-agnostic PR reviews** — Uses `gh pr diff` piped to both reviewers, not `codex review --base main` which depends on checked-out branch
+- **Context-efficient** — Diff is saved to an isolated temp folder (`/tmp/team-review-{timestamp}-{repo}-{scope}-{hash}/`), never loaded into the main conversation. Concurrent reviews don't collide. Claude reads only the specific files/lines referenced in findings, not the entire diff
+- **Research-informed reviews** — A research agent gathers latest documentation, security advisories, and common mistakes for the libraries being changed, injecting this context into reviewer prompts so they catch real issues they'd otherwise miss
+- **Branch-agnostic PR reviews** — Uses `gh pr diff` with the diff embedded in a prompt file for Oscar (`codex exec --sandbox read-only - < prompt-file`) and piped via stdin for George. Never uses `codex review --base main` which depends on the checked-out branch
 - **Diff pre-filtering** — Strips lockfiles, build output, and auto-generated code before sending to reviewers
 - **Anti-hallucination prompt** — George's prompt explicitly instructs: only flag issues in authored code, not reference docs or generated files
 - **True parallel execution** — Both reviewers launched in a single Bash call so they run concurrently
@@ -165,7 +183,8 @@ Every run saves a full log to `~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md` con
 ├── skill/
 │   └── SKILL.md                           # The skill file (copy to ~/.claude/skills/team-code-review/)
 └── agents/
-    └── review-collector.md                # The subagent file (copy to ~/.claude/agents/)
+    ├── review-collector.md                # Review collection subagent (copy to ~/.claude/agents/)
+    └── team-research-agent.md             # Pre-review research subagent (copy to ~/.claude/agents/)
 ```
 
 ## Future

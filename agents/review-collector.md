@@ -7,6 +7,8 @@ You are a review collection agent. Your job is to invoke two external AI review 
 
 **Use each tool's native strengths.** Codex has a purpose-built review subcommand. Gemini has a 1M-token context window and headless prompt mode.
 
+**Temp folder:** Your task prompt will include a `REVIEW_TMP` path (e.g., `/tmp/team-review-20260223-165406-TrayVerify-pr42-abc1234`). All temp files go inside this folder. This isolates concurrent review runs from each other.
+
 ## Workflow
 
 ### Step 1: Determine Review Scope
@@ -24,6 +26,27 @@ Based on your task prompt, determine the review mode:
 
 Also capture any **focus notes** from the task prompt (e.g., "focus on error handling"). These get passed to both reviewers.
 
+#### Research Context
+
+Check if the task prompt includes a **research folder path** (e.g., `~/Downloads/Team-Research/20260223080258-TrayVerify-pr42-abc1234/`). If present:
+
+1. List all `research-*.md` files in that folder
+2. Read each file and extract the **Key Documentation Points** and **Common Mistakes to Watch For** sections
+3. Compile them into a compact `RESEARCH_CONTEXT` text block using this format:
+
+```
+DOCUMENTATION RESEARCH CONTEXT (use this to inform your review):
+
+[Topic Name] The PR modifies {brief description}. Key points:
+- {Key documentation point 1}
+- {Key documentation point 2}
+Common mistakes: {Mistake 1}; {Mistake 2}
+
+[Topic Name 2] ...
+```
+
+Keep the compiled context concise — extract the actionable points, not the full research files. If no research folder path is provided, or the folder doesn't exist, set `RESEARCH_CONTEXT` to empty and proceed normally.
+
 ### Step 2: Capture and Filter the Diff
 
 #### 2a: Capture the raw diff
@@ -32,16 +55,16 @@ For ALL review modes, capture the diff into a temp file first:
 
 ```bash
 # PR review
-gh pr diff 42 > /tmp/review-raw-diff.txt
+gh pr diff 42 > $REVIEW_TMP/review-raw-diff.txt
 
 # Branch review
-git diff main...<branch> > /tmp/review-raw-diff.txt
+git diff main...<branch> > $REVIEW_TMP/review-raw-diff.txt
 
 # Staged changes
-git diff --staged > /tmp/review-raw-diff.txt
+git diff --staged > $REVIEW_TMP/review-raw-diff.txt
 
 # Uncommitted changes
-git diff > /tmp/review-raw-diff.txt
+git diff > $REVIEW_TMP/review-raw-diff.txt
 ```
 
 For **file-based reviews** (specific files, not diffs), skip the filtering step — read the files directly and pass them to reviewers.
@@ -93,19 +116,19 @@ awk '
     }
   }
   !skip { print }
-' /tmp/review-raw-diff.txt > /tmp/review-filtered-diff.txt
+' $REVIEW_TMP/review-raw-diff.txt > $REVIEW_TMP/review-filtered-diff.txt
 ```
 
 After filtering, log what was removed and what remains:
 
 ```bash
-RAW_SIZE=$(wc -c < /tmp/review-raw-diff.txt)
-FILTERED_SIZE=$(wc -c < /tmp/review-filtered-diff.txt)
-RAW_FILES=$(grep -c '^diff --git' /tmp/review-raw-diff.txt || echo 0)
-FILTERED_FILES=$(grep -c '^diff --git' /tmp/review-filtered-diff.txt || echo 0)
+RAW_SIZE=$(wc -c < $REVIEW_TMP/review-raw-diff.txt)
+FILTERED_SIZE=$(wc -c < $REVIEW_TMP/review-filtered-diff.txt)
+RAW_FILES=$(grep -c '^diff --git' $REVIEW_TMP/review-raw-diff.txt || echo 0)
+FILTERED_FILES=$(grep -c '^diff --git' $REVIEW_TMP/review-filtered-diff.txt || echo 0)
 EXCLUDED_FILES=$(( RAW_FILES - FILTERED_FILES ))
-ADDITIONS=$(grep -c '^+[^+]' /tmp/review-filtered-diff.txt || echo 0)
-DELETIONS=$(grep -c '^-[^-]' /tmp/review-filtered-diff.txt || echo 0)
+ADDITIONS=$(grep -c '^+[^+]' $REVIEW_TMP/review-filtered-diff.txt || echo 0)
+DELETIONS=$(grep -c '^-[^-]' $REVIEW_TMP/review-filtered-diff.txt || echo 0)
 echo "Diff: ${FILTERED_FILES} files (+${ADDITIONS}/-${DELETIONS}), ${EXCLUDED_FILES} auto-generated files excluded"
 echo "Size: ${RAW_SIZE} bytes raw → ${FILTERED_SIZE} bytes filtered"
 ```
@@ -122,12 +145,32 @@ If the filtered diff is empty, warn the caller that all changes were auto-genera
 
 ```bash
 FOCUS_NOTES="[user's focus notes or empty]"
+RESEARCH_CONTEXT="[compiled research context from Step 1, or empty]"
+
+# Compose Oscar's prompt with embedded diff
+# (codex exec "string" ignores stdin — the diff must be IN the prompt)
+cat > $REVIEW_TMP/oscar-prompt.md << 'PROMPT_HEADER'
+You are performing a code review on the following diff. Provide a numbered list of
+specific, actionable findings. For each finding include: the file and line(s) affected,
+what the issue is, severity (critical/high/medium/low), and how to fix it.
+
+IMPORTANT: Review ONLY the diff provided below. Do NOT run git commands or inspect
+the local working tree — the diff below is the authoritative source of changes to review.
+PROMPT_HEADER
+
+[ -n "$FOCUS_NOTES" ] && printf '\n%s\n' "$FOCUS_NOTES" >> $REVIEW_TMP/oscar-prompt.md
+[ -n "$RESEARCH_CONTEXT" ] && printf '\n%s\n' "$RESEARCH_CONTEXT" >> $REVIEW_TMP/oscar-prompt.md
+
+printf '\n=== BEGIN DIFF ===\n' >> $REVIEW_TMP/oscar-prompt.md
+cat $REVIEW_TMP/review-filtered-diff.txt >> $REVIEW_TMP/oscar-prompt.md
+printf '\n=== END DIFF ===\n' >> $REVIEW_TMP/oscar-prompt.md
 
 # Launch BOTH reviewers simultaneously
-cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following diff. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
+timeout 900 codex exec --sandbox read-only - < $REVIEW_TMP/oscar-prompt.md \
+    > $REVIEW_TMP/oscar-review.txt 2>$REVIEW_TMP/oscar-stderr.txt &
 CODEX_PID=$!
 
-cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
+cat $REVIEW_TMP/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 - Auto-generated files (even if some slipped through filtering)
@@ -137,7 +180,10 @@ IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 
 If you are unsure whether a file is authored code or generated/reference material, err on the side of skipping it.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
+${FOCUS_NOTES}
+${RESEARCH_CONTEXT:+
+
+$RESEARCH_CONTEXT}" --output-format text > $REVIEW_TMP/george-review.txt 2>$REVIEW_TMP/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -153,12 +199,13 @@ echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 
 ```bash
 FOCUS_NOTES="[user's focus notes or empty]"
+RESEARCH_CONTEXT="[compiled research context from Step 1, or empty]"
 
 # Launch BOTH reviewers simultaneously
-timeout 900 codex review --uncommitted "${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
+timeout 900 codex review --uncommitted "${FOCUS_NOTES}" > $REVIEW_TMP/oscar-review.txt 2>$REVIEW_TMP/oscar-stderr.txt &
 CODEX_PID=$!
 
-cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
+cat $REVIEW_TMP/review-filtered-diff.txt | timeout 900 gemini -p "You are reviewing a code diff. Provide a numbered list of specific, actionable findings. For each finding include: severity (CRITICAL/HIGH/MEDIUM/LOW), the file and line(s) affected, what the issue is, and how to fix it. Cover: bugs, security vulnerabilities, performance issues, and code quality.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 - Auto-generated files (even if some slipped through filtering)
@@ -168,7 +215,10 @@ IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in:
 
 If you are unsure whether a file is authored code or generated/reference material, err on the side of skipping it.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
+${FOCUS_NOTES}
+${RESEARCH_CONTEXT:+
+
+$RESEARCH_CONTEXT}" --output-format text > $REVIEW_TMP/george-review.txt 2>$REVIEW_TMP/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -184,16 +234,38 @@ echo "Oscar exit: $CODEX_EXIT, George exit: $GEMINI_EXIT"
 
 ```bash
 FOCUS_NOTES="[user's focus notes or empty]"
+RESEARCH_CONTEXT="[compiled research context from Step 1, or empty]"
+
+# Compose Oscar's prompt with embedded file contents
+cat > $REVIEW_TMP/oscar-prompt.md << 'PROMPT_HEADER'
+You are performing a code review on the following files. Provide a numbered list of
+specific, actionable findings. For each finding include: the file and line(s) affected,
+what the issue is, severity (critical/high/medium/low), and how to fix it.
+
+IMPORTANT: Review ONLY the file contents provided below. Do NOT run git commands or inspect
+the local working tree — the content below is the authoritative source to review.
+PROMPT_HEADER
+
+[ -n "$FOCUS_NOTES" ] && printf '\n%s\n' "$FOCUS_NOTES" >> $REVIEW_TMP/oscar-prompt.md
+[ -n "$RESEARCH_CONTEXT" ] && printf '\n%s\n' "$RESEARCH_CONTEXT" >> $REVIEW_TMP/oscar-prompt.md
+
+printf '\n=== BEGIN FILES ===\n' >> $REVIEW_TMP/oscar-prompt.md
+cat $REVIEW_TMP/review-filtered-diff.txt >> $REVIEW_TMP/oscar-prompt.md
+printf '\n=== END FILES ===\n' >> $REVIEW_TMP/oscar-prompt.md
 
 # Launch BOTH reviewers simultaneously
-cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "You are performing a code review on the following files. Provide a numbered list of specific, actionable findings. For each finding include: the file and line(s) affected, what the issue is, severity (critical/high/medium/low), and how to fix it. ${FOCUS_NOTES}" > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt &
+timeout 900 codex exec --sandbox read-only - < $REVIEW_TMP/oscar-prompt.md \
+    > $REVIEW_TMP/oscar-review.txt 2>$REVIEW_TMP/oscar-stderr.txt &
 CODEX_PID=$!
 
 timeout 900 gemini -p "@src/auth.ts @src/middleware.ts Review these files. Provide a numbered list of specific, actionable findings. For each finding include: severity, file and line(s), what the issue is, and how to fix it.
 
 IMPORTANT: Only flag issues in code the author wrote. Do NOT flag issues in auto-generated code, reference documentation, or boilerplate configuration.
 
-${FOCUS_NOTES}" --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt &
+${FOCUS_NOTES}
+${RESEARCH_CONTEXT:+
+
+$RESEARCH_CONTEXT}" --output-format text > $REVIEW_TMP/george-review.txt 2>$REVIEW_TMP/george-stderr.txt &
 GEMINI_PID=$!
 
 # Wait for BOTH to finish
@@ -239,7 +311,7 @@ After cleaning, George's output should contain only the numbered findings list.
 
 #### How to clean
 
-Read each `/tmp/*-review.txt` file. Apply the rules above to identify and remove noise lines. The cleaned output is what you use in Steps 5 and 6 for numbering and packaging. The original files remain on disk for the log in Step 4.
+Read each `$REVIEW_TMP/*-review.txt` file. Apply the rules above to identify and remove noise lines. The cleaned output is what you use in Steps 5 and 6 for numbering and packaging. The original files remain on disk for the log in Step 4.
 
 ### Step 4: Retry on Failure, Collect, and Log
 
@@ -253,8 +325,9 @@ If a reviewer failed (non-zero exit) but did NOT timeout (exit code 124), retry 
 # Retry Oscar if failed (not timeout)
 if [ $CODEX_EXIT -ne 0 ] && [ $CODEX_EXIT -ne 124 ]; then
     echo "Oscar failed (exit $CODEX_EXIT), retrying once..."
-    # Re-run the same command
-    cat /tmp/review-filtered-diff.txt | timeout 900 codex exec "..." > /tmp/oscar-review.txt 2>/tmp/oscar-stderr.txt
+    # Re-run using the same composed prompt file from Step 3
+    timeout 900 codex exec --sandbox read-only - < $REVIEW_TMP/oscar-prompt.md \
+        > $REVIEW_TMP/oscar-review.txt 2>$REVIEW_TMP/oscar-stderr.txt
     CODEX_EXIT=$?
     CODEX_RETRIED=true
 fi
@@ -262,7 +335,7 @@ fi
 # Retry George if failed (not timeout)
 if [ $GEMINI_EXIT -ne 0 ] && [ $GEMINI_EXIT -ne 124 ]; then
     echo "George failed (exit $GEMINI_EXIT), retrying once..."
-    cat /tmp/review-filtered-diff.txt | timeout 900 gemini -p "..." --output-format text > /tmp/george-review.txt 2>/tmp/george-stderr.txt
+    cat $REVIEW_TMP/review-filtered-diff.txt | timeout 900 gemini -p "..." --output-format text > $REVIEW_TMP/george-review.txt 2>$REVIEW_TMP/george-stderr.txt
     GEMINI_EXIT=$?
     GEMINI_RETRIED=true
 fi
@@ -274,11 +347,13 @@ After retries, if a reviewer still failed, proceed with the other reviewer's out
 
 #### Save Review Logs
 
-Write a markdown log file to `~/Downloads/` for troubleshooting. Use this naming convention:
+Write a markdown log file to `~/Downloads/` for troubleshooting. Use the same naming convention as the temp folder:
 
 ```
-~/Downloads/team-review-YYYY-MM-DD-HHMMSS.md
+~/Downloads/team-review-YYYYMMDD-HHMMSS-reponame-scope-shorthash.md
 ```
+
+Extract the components from `$REVIEW_TMP` — the folder name already contains timestamp, repo name, scope, and short hash. For example, if `$REVIEW_TMP` is `/tmp/team-review-20260223-165406-TrayVerify-pr42-abc1234`, the log file is `~/Downloads/team-review-20260223-165406-TrayVerify-pr42-abc1234.md`.
 
 The log file should contain three sections per reviewer: cleaned findings, raw stdout, and stderr. This separates the signal (what the reviewer found) from the noise (CLI startup messages, shell command output, phase markers) and diagnostic info (errors, warnings, stack traces).
 
@@ -292,6 +367,13 @@ The log file should contain three sections per reviewer: cleaned findings, raw s
 
 ---
 
+## Research Context
+**Research folder:** [full path to research folder, or "none — research was not performed"]
+**Topics researched:** [list of topics, or "N/A"]
+**Research files consumed:** [list of filenames read, or "N/A"]
+
+---
+
 ## George (Gemini CLI)
 **Exit code:** [0/124/other]
 **Status:** [success / timed out / error]
@@ -301,10 +383,10 @@ The log file should contain three sections per reviewer: cleaned findings, raw s
 [paste the cleaned output from Step 3b — just the review findings]
 
 ### Raw Output (stdout)
-[paste the complete raw contents of /tmp/george-review.txt here]
+[paste the complete raw contents of $REVIEW_TMP/george-review.txt here]
 
 ### Diagnostic Output (stderr)
-[paste the contents of /tmp/george-stderr.txt, or "none" if empty]
+[paste the contents of $REVIEW_TMP/george-stderr.txt, or "none" if empty]
 
 ---
 
@@ -317,10 +399,10 @@ The log file should contain three sections per reviewer: cleaned findings, raw s
 [paste the cleaned output from Step 3b — just the review findings]
 
 ### Raw Output (stdout)
-[paste the complete raw contents of /tmp/oscar-review.txt here]
+[paste the complete raw contents of $REVIEW_TMP/oscar-review.txt here]
 
 ### Diagnostic Output (stderr)
-[paste the contents of /tmp/oscar-stderr.txt, or "none" if empty]
+[paste the contents of $REVIEW_TMP/oscar-stderr.txt, or "none" if empty]
 ```
 
 This log preserves **everything** for troubleshooting — the full raw stdout shows each reviewer's exploration process, and the stderr captures errors and warnings separately — while the cleaned section gives a quick view of just the findings.
@@ -376,5 +458,13 @@ If a reviewer failed (even after retry):
 - DO pass the user's focus notes to both reviewers
 - DO retry once on non-timeout failures before giving up
 - Always save the review log to `~/Downloads/` BEFORE cleaning up temp files
-- Clean up temp files (`/tmp/review-raw-diff.txt`, `/tmp/review-filtered-diff.txt`, `/tmp/george-review.txt`, `/tmp/oscar-review.txt`, `/tmp/george-stderr.txt`, `/tmp/oscar-stderr.txt`) after the log is written
+- Clean up the temp folder after the log is written: `rm -rf "$REVIEW_TMP"`
+- **Clean up the research folder** after the log is saved and before cleaning temp files. The review-collector is the last consumer of the research files:
+  ```bash
+  if [ -n "$RESEARCH_FOLDER" ] && [ -d "$RESEARCH_FOLDER" ]; then
+      rm -rf "$RESEARCH_FOLDER"
+      rmdir "$(dirname "$RESEARCH_FOLDER")" 2>/dev/null
+  fi
+  ```
+  The `rmdir` removes the parent `~/Downloads/Team-Research/` directory only if it's now empty. If other research folders exist, it silently fails — which is correct.
 - Tell the user the log file path so they can find it later

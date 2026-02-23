@@ -9,6 +9,7 @@ flowchart TD
     classDef bucketBad fill:#E53E3E,stroke:#C53030,color:#FFFFFF,stroke-width:2px
     classDef promptStyle fill:#4A5568,stroke:#2D3748,color:#FFFFFF,stroke-width:1px
     classDef subagentStyle fill:#9F7AEA,stroke:#805AD5,color:#FFFFFF,stroke-width:2px
+    classDef researchStyle fill:#DD6B20,stroke:#C05621,color:#FFFFFF,stroke-width:2px
 
     %% Phase 1: Code Writing
     subgraph P1["🔨 PHASE 1: Code Writing"]
@@ -17,6 +18,16 @@ flowchart TD
         CC1 --> U1["""👤 User Reviews
         'Code is ready for review'"""]:::userStyle
     end
+
+    %% Phase 1.5: Pre-Review Research
+    subgraph P15["🔍 PHASE 1.5: Pre-Review Research"]
+        RESEARCH["""🟠 Research Agent
+        Analyzes diff for libraries/APIs,
+        searches latest docs + advisories,
+        writes research files"""]:::researchStyle
+    end
+
+    U1 -->|"Raw diff"| RESEARCH
 
     %% Phase 2: Parallel Code Review
     subgraph P2["🔍 PHASE 2: Parallel Code Review"]
@@ -29,8 +40,8 @@ flowchart TD
         Code Review"""]:::codexStyle
     end
 
-    U1 -->|"Send code for review"| GEORGE
-    U1 -->|"Send code for review"| OSCAR
+    RESEARCH -->|"Code + research context"| GEORGE
+    RESEARCH -->|"Code + research context"| OSCAR
 
     %% Phase 2B: Subagent collects reviews
     subgraph P2B["🤖 PHASE 2B: Subagent Collection"]

@@ -425,6 +425,26 @@ my-project/
 
 Commit `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `.mcp.json`, `.claude/settings.json`, `.gemini/settings.json`, and `.codex/config.toml` to version control so your entire team benefits from the AI tool configurations.
 
+## Team Code Review Skill Deployment
+
+The `/team-code-review` skill requires all three CLI tools above plus two subagent files deployed to Claude Code's global config:
+
+```bash
+# Skill (creates the /team-code-review slash command)
+mkdir -p ~/.claude/skills/team-code-review
+cp skill/SKILL.md ~/.claude/skills/team-code-review/SKILL.md
+
+# Subagents
+cp agents/review-collector.md ~/.claude/agents/review-collector.md
+cp agents/team-research-agent.md ~/.claude/agents/team-research-agent.md
+```
+
+### Research Agent Prerequisites
+
+The **team-research-agent** uses Claude Code's built-in WebSearch and WebFetch tools to gather documentation. These are available by default in Claude Code — no additional MCP servers or API keys are required beyond your existing Claude Code authentication.
+
+The research agent writes temporary files to `~/Downloads/Team-Research/`. This folder is created automatically during reviews and cleaned up by the review-collector after each run. If cleanup fails (e.g., the review is interrupted), the folder persists with small markdown files that can be safely deleted manually.
+
 ## Conclusion
 
 The AI coding CLI landscape has matured rapidly through 2025 into a genuinely multi-tool ecosystem. The three tools occupy distinct niches: Claude Code as the **most capable autonomous coding agent**, Gemini CLI as the **highest-context, most accessible** option, and Codex CLI as the **most automation-friendly** with the tightest CI/CD integration. Rather than picking one, the optimal setup installs all three and selects tools based on task requirements. The tools' completely separate configuration systems make this frictionless — the hardest part is keeping instruction files in sync, which tools like `ai-rules` solve elegantly. With MCP server support universal across all three, your tool integrations (GitHub, databases, search) work everywhere. The key best practice: always use git worktrees or separate branches when running multiple agents autonomously, and lean on each tool's sandboxing capabilities to prevent unintended destructive operations.
