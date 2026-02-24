@@ -31,7 +31,11 @@ Also capture any **focus notes** from the task prompt (e.g., "focus on error han
 Check if the task prompt includes a **research folder path** (e.g., `~/Downloads/Team-Research/20260223080258-TrayVerify-pr42-abc1234/`). If present:
 
 1. List all `research-*.md` files in that folder
-2. Read each file and extract the **Key Documentation Points** and **Common Mistakes to Watch For** sections
+2. Read each file and extract these sections (when present):
+   - **Key Documentation Points** — core facts about the library/API
+   - **Common Mistakes to Watch For** — patterns that cause bugs
+   - **Security Considerations** — security findings with severity and CWE references
+   - **Relevance to Code Review** — severity-tagged action items (`[MUST CHECK]`, `[VERIFY]`, `[NOTE]`)
 3. Compile them into a compact `RESEARCH_CONTEXT` text block using this format:
 
 ```
@@ -41,11 +45,13 @@ DOCUMENTATION RESEARCH CONTEXT (use this to inform your review):
 - {Key documentation point 1}
 - {Key documentation point 2}
 Common mistakes: {Mistake 1}; {Mistake 2}
+Security: {Security finding with CWE if present}
+Reviewer action items: [MUST CHECK] {item}; [VERIFY] {item}
 
 [Topic Name 2] ...
 ```
 
-Keep the compiled context concise — extract the actionable points, not the full research files. If no research folder path is provided, or the folder doesn't exist, set `RESEARCH_CONTEXT` to empty and proceed normally.
+Keep the compiled context concise — extract the actionable points, not the full research files. Prioritize `[MUST CHECK]` items — these represent genuine security or reliability risks the reviewers should not miss. If no research folder path is provided, or the folder doesn't exist, set `RESEARCH_CONTEXT` to empty and proceed normally.
 
 ### Step 2: Capture and Filter the Diff
 

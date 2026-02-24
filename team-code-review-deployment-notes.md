@@ -177,21 +177,27 @@ Every review run saves a full log to `~/Downloads/` for troubleshooting:
 
 ### Description
 
-Pre-review documentation researcher that analyzes diffs to identify the key libraries/frameworks/APIs being changed, then researches their latest documentation, security advisories, and common mistakes. Writes research files that the review-collector injects into reviewer prompts. Does NOT review code — only researches the tools the code uses.
+Pre-review documentation and context researcher. Characterizes the repository (project type, applicable standards, external services), then analyzes diffs through multiple research lenses — documentation, security, dependency health, design patterns, and compliance context. Writes structured research files with severity-tagged action items that the review-collector injects into reviewer prompts. Does NOT review code — only researches the tools the code uses.
 
 ### Key Design Decisions
 
+- **SAMD-inspired structured methodology:** Even for non-medical projects, the agent follows a structured research framework inspired by SaMD (Software as a Medical Device) review practices. This ensures consistent, thorough research that follows best practices and makes artifacts understandable to other teams or agents.
+- **Repo Profile first:** Before scanning the diff, the agent characterizes the repo — project type, primary languages, applicable standards (OWASP for web apps, SOC 2 for SaaS, IEC 62304 for medical, "general best practices" for hobby projects), AI/ML components, deployment status. This determines which research lenses to apply.
+- **Multi-lens research per topic:** Each topic is researched through up to 6 lenses: Core Documentation, Security (with OWASP/CWE mapping), Breaking Changes, Dependency Health, Design Pattern Validation, and Compliance/Standards Context. Lenses that don't apply are skipped.
+- **Severity-tagged findings:** Research files include `[MUST CHECK]`, `[VERIFY]`, and `[NOTE]` indicators in a required "Relevance to Code Review" section, telling reviewers exactly what they can't skip.
 - **Separate agent, not embedded in review-collector:** The review-collector is explicitly a "mechanical collection only" agent. Adding web research would violate its separation of concerns. The research agent has a distinct responsibility — it gathers knowledge, not reviews.
 - **Reads raw diff, not filtered:** The research agent needs to see `package.json`, `requirements.txt`, `Cargo.toml`, etc. to identify version changes and new dependencies. These files get stripped by the review-collector's diff filter, so the research agent reads `$REVIEW_TMP/review-raw-diff.txt` directly.
 - **Prompt injection, not file references:** Research context is compiled into a compact text block and injected directly into George and Oscar's prompts. This is necessary because Codex `exec` processes piped stdin and can't read external files during execution. Injecting into the prompt text ensures uniform behavior across all review modes.
+- **Standards via web search, not document fetching:** The agent does NOT download IEC/FDA/ISO PDFs. It researches how the code patterns map to the applicable standard via web search — keeping research fast and focused.
 - **Enhancement, not a requirement:** If the research agent fails, times out, or finds nothing to research, the review workflow proceeds normally without research context. Partial research (2 out of 4 topics) is also valid.
 
 ### Research Strategy
 
-1. **Diff analysis** — Scan `+` lines for imports, API calls, framework patterns, dependency file changes
-2. **Topic prioritization** — Rank by: security-relevant > breaking changes > framework conventions > new deps > complex integrations. Max 5 topics, typically 2-3.
-3. **Web search** — For each topic: official docs, security advisories (`"{library}" CVE`), common mistakes, migration guides for version bumps
-4. **File writing** — One markdown file per topic with structured sections: Key Documentation Points, Common Mistakes, Security Considerations (if applicable), Sources
+1. **Repo Profile** (15-30 sec) — Characterize the repo: project type, languages, applicable standards, external services, AI/ML components, deployment status
+2. **Diff analysis** — Scan `+` lines for imports, API calls, framework patterns, dependency file changes, AND security-relevant patterns (auth, data handling, error exposure, logging, configuration)
+3. **Topic prioritization** — Rank by: security-relevant changes > core library docs > breaking changes > compliance context > dependency health > design patterns > new deps. Max 5 topics, typically 2-3.
+4. **Multi-lens research** — For each topic, research through applicable lenses: Core Docs (always), Security with OWASP/CWE mapping (always for web-facing), Breaking Changes (for version bumps), Dependency Health (for new/updated deps), Design Patterns (for framework usage), Compliance Context (when standards apply)
+5. **File writing** — One markdown file per topic with structured sections: Key Documentation Points, Common Mistakes, Security Considerations (with CWE), Dependency Health, Design Pattern Assessment, Relevance to Code Review (always present, severity-tagged)
 
 ### Output Folder Structure
 
@@ -219,9 +225,10 @@ The folder name is dynamically constructed:
 ### Time Budget and Limits
 
 - Max 5 research topics per review
-- Target 2-3 minutes total research time
-- 30-45 seconds per topic
-- WebSearch failures → skip that topic, don't retry
+- Target 3-5 minutes total research time (increased from 2-3 to accommodate multi-lens research)
+- 45-60 seconds per topic
+- 15-30 seconds for Repo Profile (one-time, before topics)
+- WebSearch failures → skip that lens, don't retry — move to the next lens or topic
 
 ### Error Handling
 
